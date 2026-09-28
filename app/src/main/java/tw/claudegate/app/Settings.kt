@@ -8,19 +8,39 @@ class Settings(context: Context) {
     private val sp: SharedPreferences =
         context.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    var apiKey: String
+    var claudeKey: String
         get() = sp.getString("api_key", "") ?: ""
         set(v) = sp.edit().putString("api_key", v.trim()).apply()
 
-    /** 解鎖對話用的模型 */
-    var model: String
-        get() = sp.getString("model", DEFAULT_MODEL)?.ifBlank { DEFAULT_MODEL } ?: DEFAULT_MODEL
-        set(v) = sp.edit().putString("model", v.trim()).apply()
+    var geminiKey: String
+        get() = sp.getString("gemini_key", "") ?: ""
+        set(v) = sp.edit().putString("gemini_key", v.trim()).apply()
 
-    /** 離題偵測用的模型（呼叫頻率高，使用者可以自己換便宜的） */
-    var monitorModel: String
-        get() = sp.getString("monitor_model", DEFAULT_MODEL)?.ifBlank { DEFAULT_MODEL } ?: DEFAULT_MODEL
-        set(v) = sp.edit().putString("monitor_model", v.trim()).apply()
+    /** 解鎖對話、離題偵測各自用哪家的 AI（可以一個用 Claude、一個用免費的 Gemini） */
+    fun provider(role: Role): Provider =
+        Provider.fromId(sp.getString("provider_${role.id}", null))
+
+    fun setProvider(role: Role, p: Provider) =
+        sp.edit().putString("provider_${role.id}", p.id).apply()
+
+    /** 每家、每個用途各記一個模型，切換供應商時不會互相覆蓋 */
+    fun model(role: Role, p: Provider = provider(role)): String =
+        sp.getString(modelKey(role, p), null)?.ifBlank { null } ?: p.defaultModel(role)
+
+    fun setModel(role: Role, p: Provider, v: String) =
+        sp.edit().putString(modelKey(role, p), v.trim()).apply()
+
+    fun apiKey(p: Provider): String = when (p) {
+        Provider.CLAUDE -> claudeKey
+        Provider.GEMINI -> geminiKey
+    }
+
+    // 舊版的 "model"／"monitor_model" 就是 Claude 的兩個模型，沿用同一個 key
+    private fun modelKey(role: Role, p: Provider) = when {
+        p == Provider.CLAUDE && role == Role.GATE -> "model"
+        p == Provider.CLAUDE && role == Role.MONITOR -> "monitor_model"
+        else -> "model_${p.id}_${role.id}"
+    }
 
     /** 被鎖住的 App 套件名稱 */
     var lockedApps: Set<String>
@@ -61,7 +81,22 @@ class Settings(context: Context) {
     fun focusActive(now: Long = System.currentTimeMillis()): Boolean =
         focusUntil > now && focusGoal.isNotBlank()
 
+}
+
+/** AI 的兩種用途 */
+enum class Role(val id: String) { GATE("gate"), MONITOR("monitor") }
+
+/** 支援的 AI 供應商 */
+enum class Provider(val id: String, val displayName: String) {
+    CLAUDE("claude", "Claude"),
+    GEMINI("gemini", "Gemini");
+
+    fun defaultModel(role: Role): String = when (this) {
+        CLAUDE -> "claude-opus-5"
+        GEMINI -> if (role == Role.GATE) "gemini-3.8-flash" else "gemini-3.5-flash-lite"
+    }
+
     companion object {
-        const val DEFAULT_MODEL = "claude-opus-5"
+        fun fromId(id: String?) = entries.firstOrNull { it.id == id } ?: CLAUDE
     }
 }

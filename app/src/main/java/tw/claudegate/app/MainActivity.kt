@@ -9,20 +9,24 @@ import android.view.View
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import tw.claudegate.app.Ui.dp
 
-/** 設定頁：權限、API 金鑰、要鎖的 App／網站、專注模式、給 Claude 的規則、目前解鎖中的項目。 */
+/** 設定頁：權限、API 金鑰、要鎖的 App／網站、專注模式、給 AI 的規則、目前解鎖中的項目。 */
 class MainActivity : Activity() {
 
     private lateinit var settings: Settings
 
     private lateinit var serviceStatus: TextView
-    private lateinit var apiKey: EditText
-    private lateinit var model: EditText
-    private lateinit var monitorModel: EditText
+    private lateinit var claudeKey: EditText
+    private lateinit var geminiKey: EditText
+    /** 每個用途目前選的供應商（還沒存）與模型欄位 */
+    private val chosen = HashMap<Role, Provider>()
+    private val modelFields = HashMap<Role, EditText>()
     private lateinit var appsSummary: TextView
     private lateinit var siteList: LinearLayout
     private lateinit var newSite: EditText
@@ -58,7 +62,7 @@ class MainActivity : Activity() {
         val add = { v: View -> c.addView(v) }
 
         add(Ui.text(this, getString(R.string.app_name), 24f, bold = true))
-        add(Ui.note(this, "被鎖住的 App 或網站要先跟 Claude 說明理由，Claude 同意後才能用；使用中如果離題，Claude 會在畫面上方提醒你。"))
+        add(Ui.note(this, "被鎖住的 App 或網站要先跟 AI（Claude 或 Gemini）說明理由，同意後才能用；使用中如果離題，會在畫面上方提醒你。"))
 
         // 1. 權限
         add(Ui.section(this, "1. 無障礙權限"))
@@ -69,18 +73,20 @@ class MainActivity : Activity() {
             startActivity(Intent(SysSettings.ACTION_ACCESSIBILITY_SETTINGS))
         })
 
-        // 2. Claude
-        add(Ui.section(this, "2. Claude API"))
-        apiKey = Ui.edit(this, "Anthropic API 金鑰（sk-ant-…）", settings.apiKey,
+        // 2. AI
+        add(Ui.section(this, "2. AI 設定"))
+        add(Ui.note(this, "解鎖對話和離題偵測可以各自選 Claude 或 Gemini，例如解鎖用 Claude、離題偵測用有免費額度的 Gemini。"))
+        add(Ui.text(this, "Claude API 金鑰（console.anthropic.com）", 14f))
+        claudeKey = Ui.edit(this, "sk-ant-…", settings.claudeKey,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-        add(apiKey)
-        add(Ui.note(this, "到 console.anthropic.com 建立金鑰。金鑰只存在這支手機的 App 私有空間。"))
-        add(Ui.note(this, "解鎖對話用的模型"))
-        model = Ui.edit(this, Settings.DEFAULT_MODEL, settings.model)
-        add(model)
-        add(Ui.note(this, "離題偵測用的模型（會定期呼叫；想省錢可改成 claude-haiku-4-5）"))
-        monitorModel = Ui.edit(this, Settings.DEFAULT_MODEL, settings.monitorModel)
-        add(monitorModel)
+        add(claudeKey)
+        add(Ui.text(this, "Gemini API 金鑰（aistudio.google.com，有免費額度）", 14f))
+        geminiKey = Ui.edit(this, "AIza…", settings.geminiKey,
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        add(geminiKey)
+        add(Ui.note(this, "⚠️ Gemini 免費版送出的內容（包含離題偵測抓到的畫面文字）可能被 Google 用來改進產品，也可能有人工審閱。金鑰只存在這支手機的 App 私有空間。"))
+        addProviderPicker(c, Role.GATE, "解鎖對話用")
+        addProviderPicker(c, Role.MONITOR, "離題偵測用（會定期呼叫，建議用便宜或免費的模型）")
 
         // 3. App
         add(Ui.section(this, "3. 要鎖住的 App"))
@@ -104,7 +110,7 @@ class MainActivity : Activity() {
 
         // 5. 專注模式
         add(Ui.section(this, "5. 專注模式（瀏覽器離題提醒）"))
-        add(Ui.note(this, "寫下你現在要做的事。專注期間，你在瀏覽器看的網頁會交給 Claude 判斷跟這件事有沒有關係，沒關係就提醒你。"))
+        add(Ui.note(this, "寫下你現在要做的事。專注期間，你在瀏覽器看的網頁會交給 AI 判斷跟這件事有沒有關係，沒關係就提醒你。"))
         focusGoal = Ui.edit(this, "例如：查資料寫期末報告（主題：台灣能源轉型）", settings.focusGoal,
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE)
         add(focusGoal)
@@ -119,8 +125,8 @@ class MainActivity : Activity() {
         add(focusStatus)
 
         // 6. 規則
-        add(Ui.section(this, "6. 給 Claude 的規則"))
-        add(Ui.note(this, "用自己的話寫，Claude 判斷時會優先照這些規則。"))
+        add(Ui.section(this, "6. 給 AI 的規則"))
+        add(Ui.note(this, "用自己的話寫，AI 判斷時會優先照這些規則。"))
         rules = Ui.edit(this, "例如：平日晚上 11 點後除非有人找我，不要讓我滑 IG。LINE 回訊息可以，但不要看 LINE TODAY。",
             settings.rules, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply { minLines = 3 }
         add(rules)
@@ -142,7 +148,7 @@ class MainActivity : Activity() {
         intRow.addView(monitorInterval, LinearLayout.LayoutParams(dp(72), Ui.wrap()).apply { marginStart = dp(8) })
         intRow.addView(Ui.text(this, "秒檢查一次（換頁時也會檢查）"))
         add(intRow)
-        add(Ui.note(this, "檢查時會把畫面上的文字（最多約 2500 字，不含密碼欄）送到 Claude API。只有被鎖的目標解鎖期間、以及專注模式下的瀏覽器會送。"))
+        add(Ui.note(this, "檢查時會把畫面上的文字（最多約 2500 字，不含密碼欄）送到你選的 AI。只有被鎖的目標解鎖期間、以及專注模式下的瀏覽器會送。"))
         add(Ui.button(this, "儲存設定") { save(quiet = false) })
 
         // 7. 解鎖中
@@ -155,6 +161,38 @@ class MainActivity : Activity() {
             addView(c)
         }
         setContentView(scroll)
+    }
+
+    /** 一個用途的「Claude / Gemini」選擇＋模型欄位；切換時各家的模型分開記 */
+    private fun addProviderPicker(parent: LinearLayout, role: Role, title: String) {
+        parent.addView(Ui.text(this, title, 14f, Ui.ACCENT).apply { setPadding(0, dp(10), 0, 0) })
+        val current = settings.provider(role)
+        chosen[role] = current
+        val model = Ui.edit(this, current.defaultModel(role), settings.model(role, current))
+        val group = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+        for (p in Provider.entries) {
+            val b = RadioButton(this).apply {
+                id = View.generateViewId()
+                text = p.displayName
+                setTextColor(Ui.TEXT)
+                tag = p
+            }
+            group.addView(b)
+            if (p == current) group.check(b.id)
+        }
+        group.setOnCheckedChangeListener { g, id ->
+            val next = g.findViewById<RadioButton>(id)?.tag as? Provider ?: return@setOnCheckedChangeListener
+            val prev = chosen[role] ?: return@setOnCheckedChangeListener
+            if (prev == next) return@setOnCheckedChangeListener
+            settings.setModel(role, prev, model.text.toString())   // 先記住上一家的模型
+            chosen[role] = next
+            model.hint = next.defaultModel(role)
+            model.setText(settings.model(role, next))
+        }
+        parent.addView(group)
+        parent.addView(Ui.note(this, "模型"))
+        parent.addView(model)
+        modelFields[role] = model
     }
 
     private fun refresh() {
@@ -234,9 +272,13 @@ class MainActivity : Activity() {
     }
 
     private fun save(quiet: Boolean) {
-        settings.apiKey = apiKey.text.toString()
-        settings.model = model.text.toString()
-        settings.monitorModel = monitorModel.text.toString()
+        settings.claudeKey = claudeKey.text.toString()
+        settings.geminiKey = geminiKey.text.toString()
+        for (role in Role.entries) {
+            val p = chosen[role] ?: continue
+            settings.setProvider(role, p)
+            settings.setModel(role, p, modelFields[role]?.text.toString())
+        }
         settings.rules = rules.text.toString()
         maxMinutes.text.toString().toIntOrNull()?.let { settings.maxMinutes = it }
         monitorInterval.text.toString().toIntOrNull()?.let { settings.monitorIntervalSec = it }

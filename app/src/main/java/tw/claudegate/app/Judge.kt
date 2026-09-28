@@ -1,21 +1,6 @@
 package tw.claudegate.app
 
 import android.content.Context
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
-import com.anthropic.core.JsonValue
-import com.anthropic.errors.AnthropicIoException
-import com.anthropic.errors.AnthropicServiceException
-import com.anthropic.errors.BadRequestException
-import com.anthropic.errors.NotFoundException
-import com.anthropic.errors.PermissionDeniedException
-import com.anthropic.errors.RateLimitException
-import com.anthropic.errors.UnauthorizedException
-import com.anthropic.models.messages.JsonOutputFormat
-import com.anthropic.models.messages.Message
-import com.anthropic.models.messages.MessageCreateParams
-import com.anthropic.models.messages.OutputConfig
-import com.anthropic.models.messages.StopReason
 import org.json.JSONException
 import org.json.JSONObject
 import java.time.LocalDateTime
@@ -23,27 +8,21 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * 跟 Claude 溝通的兩件事：
- *  - decide()：解鎖對話，Claude 回 approve / deny / ask。
+ * AI 要判斷的兩件事（跟用哪一家 AI 無關）：
+ *  - decide()：解鎖對話，回 approve / deny / ask。
  *  - checkRelevance()：使用中的畫面跟使用者說的目的有沒有關係。
- * 兩個都用結構化輸出（JSON schema），回傳一定是合法 JSON。
- * 都是阻塞呼叫，請在 Dispatchers.IO 上用。
+ * 兩個都用結構化輸出（JSON schema）。都是阻塞呼叫，請在 Dispatchers.IO 上用。
  */
-class ClaudeJudge(context: Context) {
+class Judge(context: Context) {
 
     private val ctx = context.applicationContext
     private val settings = Settings(ctx)
-
-    /** 對話中的一句。fromUser=false 時 text 是 Claude 回的 JSON 原文 */
-    data class Turn(val fromUser: Boolean, val text: String)
 
     enum class Kind { APPROVE, DENY, ASK }
 
     data class Decision(val kind: Kind, val minutes: Int, val purpose: String, val reply: String, val raw: String)
 
     data class Relevance(val onTask: Boolean, val reminder: String)
-
-    class JudgeException(message: String) : Exception(message)
 
     // ---------------------------------------------------------------- 解鎖
 
@@ -72,13 +51,7 @@ class ClaudeJudge(context: Context) {
             append("\n</rules>")
         }
 
-        val b = baseParams(settings.model)
-            .maxTokens(8000L)
-            .system(system)
-            .outputConfig(outputConfig(settings.model, OutputConfig.Effort.MEDIUM, DECISION_SCHEMA))
-        for (t in history) if (t.fromUser) b.addUserMessage(t.text) else b.addAssistantMessage(t.text)
-
-        val (raw, json) = call(b.build())
+        val (raw, json) = call(Role.GATE, system, history, DECISION_SCHEMA, maxTokens = 8000)
         val kind = when (json.optString("decision")) {
             "approve" -> Kind.APPROVE
             "deny" -> Kind.DENY
@@ -88,7 +61,7 @@ class ClaudeJudge(context: Context) {
         // approve 但分鐘數是 0 → 當成還在問
         val finalKind = if (kind == Kind.APPROVE && minutes <= 0) Kind.ASK else kind
         return Decision(finalKind, minutes, json.optString("purpose").trim(),
-            json.optString("reply").trim().ifEmpty { "（Claude 沒有回覆內容）" }, raw)
+            json.optString("reply").trim().ifEmpty { "（沒有回覆內容）" }, raw)
     }
 
     // ---------------------------------------------------------------- 離題偵測
@@ -111,91 +84,26 @@ class ClaudeJudge(context: Context) {
             append(screen.ifBlank { "（抓不到文字，可能是圖片或影片）" })
             append("\n</screen>")
         }
-        val params = baseParams(settings.monitorModel)
-            .maxTokens(4000L)
-            .system(system)
-            .outputConfig(outputConfig(settings.monitorModel, OutputConfig.Effort.LOW, RELEVANCE_SCHEMA))
-            .addUserMessage(user)
-            .build()
-        val (_, json) = call(params)
+        val (_, json) = call(Role.MONITOR, system, listOf(Turn(true, user)), RELEVANCE_SCHEMA, maxTokens = 4000)
         return Relevance(json.optBoolean("on_task", true), json.optString("reminder").trim())
     }
 
     // ---------------------------------------------------------------- 共用
 
-    private fun baseParams(model: String): MessageCreateParams.Builder {
-        val b = MessageCreateParams.builder().model(model)
-        if (supportsServerFallback(model)) {
-            // Claude 的安全分類器偶爾誤判拒答時，由伺服器自動改用別的模型回答
-            b.putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
-            b.putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
-        }
-        return b
-    }
-
-    private fun outputConfig(model: String, effort: OutputConfig.Effort, schema: Map<String, Any>): OutputConfig {
-        val format = JsonOutputFormat.builder()
-            .schema(JsonOutputFormat.Schema.builder()
-                .apply { schema.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }
-                .build())
-            .build()
-        val b = OutputConfig.builder().format(format)
-        // Haiku 4.5 不支援 effort 參數，送了會 400
-        if (!model.startsWith("claude-haiku")) b.effort(effort)
-        return b.build()
-    }
-
-    private fun supportsServerFallback(model: String) =
-        model.startsWith("claude-opus-5") || model.startsWith("claude-fable-5")
-
-    /** 送出並解析；回傳 (JSON 原文, 解析後的物件) */
-    private fun call(params: MessageCreateParams): Pair<String, JSONObject> {
-        val msg: Message = try {
-            client().messages().create(params)
-        } catch (e: UnauthorizedException) {
-            throw JudgeException("API 金鑰無效，請到設定頁檢查。")
-        } catch (e: PermissionDeniedException) {
-            throw JudgeException("這把 API 金鑰沒有使用這個模型的權限。")
-        } catch (e: NotFoundException) {
-            throw JudgeException("找不到模型「${params.model()}」，請到設定頁檢查模型名稱。")
-        } catch (e: RateLimitException) {
-            throw JudgeException("太多請求了，等一下再試。")
-        } catch (e: BadRequestException) {
-            throw JudgeException("請求被拒絕（400）：${e.message?.take(200)}")
-        } catch (e: AnthropicServiceException) {
-            throw JudgeException("Claude 暫時無法回應（${e.statusCode()}），等一下再試。")
-        } catch (e: AnthropicIoException) {
-            throw JudgeException("連不上 Claude，請確認網路。")
-        }
-
-        val stop = msg.stopReason().orElse(null)
-        if (stop == StopReason.REFUSAL) throw JudgeException("Claude 拒絕回答這個請求。")
-        if (stop == StopReason.MAX_TOKENS) throw JudgeException("Claude 的回覆太長被截斷了，請再送一次。")
-
-        val raw = msg.content().mapNotNull { it.text().orElse(null)?.text() }.joinToString("").trim()
+    /** 依設定選供應商與模型，送出並解析；回傳 (JSON 原文, 解析後的物件) */
+    private fun call(role: Role, system: String, turns: List<Turn>, schema: Map<String, Any>, maxTokens: Int): Pair<String, JSONObject> {
+        val p = settings.provider(role)
+        val raw = AiBackend.of(p, settings.apiKey(p))
+            .completeJson(settings.model(role, p), system, turns, schema, maxTokens, light = role == Role.MONITOR)
         val json = try {
             JSONObject(raw)
         } catch (e: JSONException) {
-            throw JudgeException("看不懂 Claude 的回覆，請再送一次。")
+            throw AiException("看不懂 ${p.displayName} 的回覆，請再送一次。")
         }
         return raw to json
     }
 
-    private fun client(): AnthropicClient {
-        val key = settings.apiKey
-        if (key.isBlank()) throw JudgeException("還沒設定 API 金鑰。")
-        synchronized(ClaudeJudge::class.java) {
-            cached?.let { (k, c) -> if (k == key) return c }
-            val c = AnthropicOkHttpClient.builder().apiKey(key).build()
-            cached = key to c
-            return c
-        }
-    }
-
     companion object {
-        @Volatile
-        private var cached: Pair<String, AnthropicClient>? = null
-
         private val DECISION_SCHEMA: Map<String, Any> = mapOf(
             "type" to "object",
             "properties" to mapOf(

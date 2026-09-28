@@ -37,8 +37,10 @@ android {
 }
 
 dependencies {
-    // 刻意不用 AndroidX：畫面全部用框架元件在程式裡建，相依只剩這兩個
+    // 刻意不用 AndroidX：畫面全部用框架元件在程式裡建，相依只有下面這幾個
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // Claude API 官方 SDK（內含 OkHttp）
     implementation("com.anthropic:anthropic-java:2.65.0")
+    // Gemini 用 REST 呼叫（Claude SDK 本來就帶了 OkHttp，這裡明確宣告）
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
