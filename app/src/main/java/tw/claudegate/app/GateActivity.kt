@@ -27,18 +27,18 @@ import kotlinx.coroutines.withContext
 import tw.claudegate.app.Ui.dp
 
 /**
- * 解鎖對話：打開被鎖的 App／網站時跳到這裡，跟 Claude 說明理由，
- * Claude 同意（approve）才會記下一筆 Grant 並打開目標。
+ * 解鎖對話：打開被鎖的 App／網站時跳到這裡，跟 AI（Claude 或 Gemini）說明理由，
+ * AI 同意（approve）才會記下一筆 Grant 並打開目標。
  */
 class GateActivity : Activity() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var settings: Settings
-    private lateinit var judge: ClaudeJudge
+    private lateinit var judge: Judge
 
     private var target: Target? = null
     private var expired = false
-    private val history = mutableListOf<ClaudeJudge.Turn>()
+    private val history = mutableListOf<Turn>()
     private var job: Job? = null
 
     private lateinit var icon: ImageView
@@ -56,7 +56,7 @@ class GateActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = Settings(this)
-        judge = ClaudeJudge(this)
+        judge = Judge(this)
         buildUi()
         load(intent)
     }
@@ -116,7 +116,7 @@ class GateActivity : Activity() {
         root.addView(emergencyBtn)
 
         inputRow = Ui.row(this).apply { gravity = Gravity.BOTTOM }
-        input = Ui.edit(this, "跟 Claude 說你為什麼想打開…", "",
+        input = Ui.edit(this, "說說你為什麼想打開…", "",
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                 InputType.TYPE_TEXT_FLAG_CAP_SENTENCES).apply { maxLines = 5 }
         send = Ui.button(this, "送出") { onSend() }
@@ -178,8 +178,10 @@ class GateActivity : Activity() {
             else "要打開 $label 做什麼呢？說得越具體（找誰、查什麼、要多久），越容易通過。",
             fromUser = false,
         )
-        if (settings.apiKey.isBlank()) {
-            bubble("還沒設定 Anthropic API 金鑰，我沒辦法判斷。請先到「Claude 守門員」設定頁填入金鑰。",
+        val provider = settings.provider(Role.GATE)
+        input.hint = "跟 ${provider.displayName} 說你為什麼想打開…"
+        if (settings.apiKey(provider).isBlank()) {
+            bubble("還沒設定 ${provider.displayName} 的 API 金鑰，我沒辦法判斷。請先到「${getString(R.string.app_name)}」設定頁填入金鑰。",
                 fromUser = false, color = 0xFF5A3A2A.toInt())
             openBtn.text = "前往設定"
             openBtn.setOnClickListener {
@@ -198,7 +200,7 @@ class GateActivity : Activity() {
         if (msg.isEmpty()) return
         input.setText("")
         bubble(msg, fromUser = true)
-        history.add(ClaudeJudge.Turn(fromUser = true, text = msg))
+        history.add(Turn(fromUser = true, text = msg))
         setBusy(true)
 
         job = scope.launch {
@@ -206,15 +208,15 @@ class GateActivity : Activity() {
                 val d = withContext(Dispatchers.IO) {
                     judge.decide(t, expired, history.toList())
                 }
-                // 回覆原文（JSON）放回歷史，下一輪 Claude 才看得到自己說過什麼
-                history.add(ClaudeJudge.Turn(fromUser = false, text = d.raw))
+                // 回覆原文（JSON）放回歷史，下一輪 AI 才看得到自己說過什麼
+                history.add(Turn(fromUser = false, text = d.raw))
                 bubble(d.reply, fromUser = false)
                 when (d.kind) {
-                    ClaudeJudge.Kind.APPROVE -> onApproved(t, d)
-                    ClaudeJudge.Kind.DENY -> UsageLog.record(this@GateActivity, t.key, approved = false, minutes = 0)
-                    ClaudeJudge.Kind.ASK -> Unit
+                    Judge.Kind.APPROVE -> onApproved(t, d)
+                    Judge.Kind.DENY -> UsageLog.record(this@GateActivity, t.key, approved = false, minutes = 0)
+                    Judge.Kind.ASK -> Unit
                 }
-            } catch (e: ClaudeJudge.JudgeException) {
+            } catch (e: AiException) {
                 // 這一輪沒有成功：把使用者那句拿掉，讓他可以重送
                 if (history.lastOrNull()?.fromUser == true) history.removeAt(history.lastIndex)
                 bubble("⚠️ ${e.message}", fromUser = false, color = 0xFF5A3A2A.toInt())
@@ -226,7 +228,7 @@ class GateActivity : Activity() {
         }
     }
 
-    private fun onApproved(t: Target, d: ClaudeJudge.Decision) {
+    private fun onApproved(t: Target, d: Judge.Decision) {
         val now = System.currentTimeMillis()
         val g = Grant(t.key, t.label(this), d.purpose, now, now + d.minutes * 60_000L)
         Grants.put(this, g)
@@ -246,7 +248,7 @@ class GateActivity : Activity() {
         openTarget(t)
     }
 
-    /** API 連不上時的逃生口：每天有限次數，時間很短，會記錄下來讓 Claude 之後看到 */
+    /** API 連不上時的逃生口：每天有限次數，時間很短，會記錄下來讓 AI 之後看到 */
     private fun showEmergencyIfAllowed() {
         val left = EMERGENCY_PER_DAY - UsageLog.totalEmergencyToday(this)
         if (left <= 0) return

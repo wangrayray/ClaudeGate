@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Claude 守門員</string>
     <string name="service_label">Claude 守門員（鎖 App 與網站）</string>
-    <string name="service_description">偵測你打開了哪個 App 或網站。被鎖住的 App／網站會先跳到 Claude 解鎖對話；已解鎖期間，會定期把畫面上的文字送給 Claude 判斷你是不是還在做你說要做的事。只有被鎖的目標與專注模式下的瀏覽器會送出畫面文字。</string>
+    <string name="service_description">偵測你打開了哪個 App 或網站。被鎖住的 App／網站會先跳到 AI（Claude 或 Gemini）解鎖對話；已解鎖期間，會定期把畫面上的文字送給 AI 判斷你是不是還在做你說要做的事。只有被鎖的目標與專注模式下的瀏覽器會送出畫面文字。</string>
 </resources>

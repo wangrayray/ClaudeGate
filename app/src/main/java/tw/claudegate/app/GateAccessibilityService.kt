@@ -30,14 +30,14 @@ import tw.claudegate.app.Ui.dp
  * 整個 App 的核心：
  *  1. 偵測前景 App 與瀏覽器網址；被鎖且沒有有效解鎖 → 跳到 GateActivity。
  *  2. 解鎖時間到 → 再跳一次 GateActivity（「時間到」）。
- *  3. 解鎖期間／專注模式下，定期把畫面文字交給 Claude 判斷有沒有離題，離題就在畫面上方提醒。
+ *  3. 解鎖期間／專注模式下，定期把畫面文字交給 AI 判斷有沒有離題，離題就在畫面上方提醒。
  */
 class GateAccessibilityService : AccessibilityService() {
 
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var settings: Settings
-    private lateinit var judge: ClaudeJudge
+    private lateinit var judge: Judge
 
     /** 不算「換了前景」的套件：系統列、輸入法 */
     private var ignored: Set<String> = emptySet()
@@ -73,7 +73,7 @@ class GateAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         settings = Settings(this)
-        judge = ClaudeJudge(this)
+        judge = Judge(this)
         val imes = try {
             getSystemService(InputMethodManager::class.java).enabledInputMethodList.map { it.packageName }
         } catch (e: Exception) {
@@ -213,7 +213,8 @@ class GateAccessibilityService : AccessibilityService() {
 
     /** 離題偵測 */
     private fun monitor(now: Long) {
-        if (checking?.isActive == true || settings.apiKey.isBlank()) return
+        if (checking?.isActive == true) return
+        if (settings.apiKey(settings.provider(Role.MONITOR)).isBlank()) return
         val pkg = fgPkg ?: return
         if (pkg == packageName) return
         val grant = currentGrant(now)
@@ -266,7 +267,7 @@ class GateAccessibilityService : AccessibilityService() {
                 withContext(Dispatchers.IO) {
                     judge.checkRelevance(purpose, label, url, usedMin, leftMin, screen)
                 }
-            } catch (e: ClaudeJudge.JudgeException) {
+            } catch (e: AiException) {
                 Log.w(TAG, "relevance check failed: ${e.message}")
                 return@launch
             }
@@ -283,7 +284,8 @@ class GateAccessibilityService : AccessibilityService() {
     // ---------------------------------------------------------------- 畫面上方的提醒
 
     private fun showReminder(msg: String, grant: Grant?, streak: Int) {
-        val title = if (streak >= 2) "Claude 提醒（連續第 $streak 次）" else "Claude 提醒"
+        val name = settings.provider(Role.MONITOR).displayName
+        val title = if (streak >= 2) "$name 提醒（連續第 $streak 次）" else "$name 提醒"
         val body = msg.ifBlank { "這個畫面好像跟你原本要做的事沒什麼關係。" }
         val actions = mutableListOf<Pair<String, () -> Unit>>("回到正事" to { removeOverlay() })
         if (grant != null) {
@@ -372,7 +374,7 @@ class GateAccessibilityService : AccessibilityService() {
     }
 }
 
-/** 把畫面上看得到的文字抓下來（給 Claude 判斷是否離題用）。 */
+/** 把畫面上看得到的文字抓下來（給 AI 判斷是否離題用）。 */
 object ScreenText {
     private const val MAX_CHARS = 2500
     private const val MAX_NODES = 600
