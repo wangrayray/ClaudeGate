@@ -1,0 +1,5 @@
+<resources>
+    <!-- 程式裡的顏色集中在 Ui.kt；這裡只放主題與圖示用的 -->
+    <color name="bg">#FF1F1E1D</color>
+    <color name="accent">#FFD97757</color>
+</resources>
